@@ -1,118 +1,32 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import pandas as pd
-from screener_scraper import get_bulk_deals
-import telegram
-import datetime
+name: IPO Tracker Daily Run
 
-# -------------------------
-#  GOOGLE SHEETS CONNECT
-# -------------------------
-def connect_sheet():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "service_account.json", scope
-    )
-    client = gspread.authorize(creds)
-    return client.open("IPO_Tracker")   # Your sheet name
+on:
+  schedule:
+    - cron: "30 14 * * *"   # 14:30 UTC = 8:00 PM IST
+  workflow_dispatch:
 
-# -------------------------
-#  READ IPO LIST (MAIN + SME)
-# -------------------------
-def read_ipo_list(sheet):
-    df_main = pd.DataFrame(sheet.worksheet("Mainboard").get_all_records())
-    df_sme = pd.DataFrame(sheet.worksheet("SME").get_all_records())
-    df = pd.concat([df_main, df_sme], ignore_index=True)
-    df["Symbol"] = df["Symbol"].str.upper().str.strip()
-    return df
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
 
-# -------------------------
-#  READ MASTER LOG
-# -------------------------
-def read_master(sheet):
-    ws = sheet.worksheet("Master_Log")
-    records = ws.get_all_records()
-    return pd.DataFrame(records), ws
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-# -------------------------
-#  TELEGRAM
-# -------------------------
-def send_telegram(msg: str):
-    bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    bot.send_message(chat_id=chat_id, text=msg)
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
 
-# -------------------------
-#  MAIN
-# -------------------------
-def main():
-    print("Connecting to Google Sheet...")
-    sheet = connect_sheet()
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-    print("Loading IPO list...")
-    ipo_list = read_ipo_list(sheet)
-    symbols = ipo_list["Symbol"].tolist()
+      - name: Create service account JSON
+        run: |
+          echo "$GSPREAD_SA_JSON_B64" | base64 --decode > service_account.json
 
-    print("Loading Master Log...")
-    master_df, master_ws = read_master(sheet)
-
-    print("Scraping Screener data...")
-    deals = []
-
-    for sym in symbols:
-        print(f"Checking {sym}")
-        try:
-            rows = get_bulk_deals(sym)
-            for r in rows:
-                r["Symbol"] = sym
-                deals.append(r)
-        except Exception as e:
-            print(f"Error scraping {sym}: {e}")
-
-    if not deals:
-        print("No deals found today.")
-        return
-
-    deals_df = pd.DataFrame(deals)
-
-    # -------------------------
-    # FILTER NEW DEALS ONLY
-    # -------------------------
-    if not master_df.empty:
-        merged = deals_df.merge(master_df, on=["Symbol", "Date", "Type", "Quantity", "Price"], how="left", indicator=True)
-        new_deals = merged[merged["_merge"] == "left_only"][deals_df.columns]
-    else:
-        new_deals = deals_df
-
-    if new_deals.empty:
-        print("No new deals.")
-        return
-
-    # -------------------------
-    # APPEND TO MASTER LOG
-    # -------------------------
-    values = new_deals.values.tolist()
-    master_ws.append_rows(values)
-
-    # -------------------------
-    # SEND TELEGRAM ALERT
-    # -------------------------
-    final_msg = "📊 *New Bulk Deals Detected:*\n\n"
-    for _, row in new_deals.iterrows():
-        final_msg += f"🏷 *{row['Symbol']}*\n"
-        final_msg += f"📅 Date: {row['Date']}\n"
-        final_msg += f"📈 Type: {row['Type']}\n"
-        final_msg += f"💰 Qty: {row['Quantity']}\n"
-        final_msg += f"💵 Price: {row['Price']}\n\n"
-
-    send_telegram(final_msg.strip())
-
-    print("Done! Alerts sent.")
-
-# -------------------------
-if __name__ == "__main__":
-    import os
-    main()
+      - name: Run Script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 main.py
